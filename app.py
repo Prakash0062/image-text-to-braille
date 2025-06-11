@@ -1,95 +1,105 @@
-from flask import Flask, render_template, request
-import pytesseract
-from PIL import Image
-import cv2
-import numpy as np
 import os
+from flask import Flask, request, render_template, redirect, url_for
+from werkzeug.utils import secure_filename
+from PIL import Image
+import pytesseract
 from gtts import gTTS
+from langdetect import detect
+from functools import lru_cache
+
 app = Flask(__name__)
 
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# Configure upload and audio folders
+UPLOAD_FOLDER = 'static/uploads'
+AUDIO_FOLDER = 'static/audio'
 
-braille = ['\u2834','\u2802','\u2806','\u2812','\u2832','\u2822','\u2816','\u2836','\u2826','\u2814',
-           '\u2801','\u2803','\u2809','\u2819','\u2811','\u280b','\u281b','\u2813','\u280a','\u281a',
-           '\u2805','\u2807','\u280d','\u281d','\u2815','\u280f','\u281f','\u2817','\u280e','\u281e',
-           '\u2825','\u2827','\u283a','\u282d','\u283d','\u2835',
-           '\u2831','\u2830','\u2823','\u283f','\u2800','\u282e','\u2810','\u283c','\u282b','\u2829',
-           '\u282f','\u2804','\u2837','\u283e','\u2821','\u282c','\u2820','\u2824','\u2828','\u280c',
-           '\u281c','\u2839','\u2808','\u282a','\u2833','\u283b','\u2818','\u2838']
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(AUDIO_FOLDER, exist_ok=True)
 
-English = ['0','1','2','3','4','5','6','7','8','9',
-           'a','b','c','d','e','f','g','h','i','j',
-           'k','l','m','n','o','p','q','r','s','t',
-           'u','v','w','x','y','z',
-           ':',';','<','=',' ','!','"','#','$','%',
-           '&','','(',')','*','+',',','-','.','/',
-           '>','?','@','[','\\',']','^','_']
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['AUDIO_FOLDER'] = AUDIO_FOLDER
 
-def preprocess_image(image_path):
-    image = cv2.imread(image_path)
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-    return gray
+# Braille character map (same as before)
+braille_map = {
+    'a': '⠁', 'b': '⠃', 'c': '⠉', 'd': '⠙', 'e': '⠑',
+    'f': '⠋', 'g': '⠛', 'h': '⠓', 'i': '⠊', 'j': '⠚',
+    'k': '⠅', 'l': '⠇', 'm': '⠍', 'n': '⠝', 'o': '⠕',
+    'p': '⠏', 'q': '⠟', 'r': '⠗', 's': '⠎', 't': '⠞',
+    'u': '⠥', 'v': '⠧', 'w': '⠺', 'x': '⠭', 'y': '⠽',
+    'z': '⠵',
+    ' ': ' ', '\n': '\n', ',': '⠂', '.': '⠲', '?': '⠦', '!': '⠖',
+    # Hindi characters...
+    "अ": "⠁", "आ": "⠡", "इ": "⠊", "ई": "⠒", "उ": "⠥", "ऊ": "⠳",
+    "ए": "⠑", "ऐ": "⠣", "ओ": "⠕", "औ": "⠷", "ऋ": "⠗", "क": "⠅",
+    "ख": "⠩", "ग": "⠛", "घ": "⠣", "ङ": "⠻", "च": "⠉", "छ": "⠡",
+    "ज": "⠚", "झ": "⠒", "ञ": "⠱", "ट": "⠞", "ठ": "⠾", "ड": "⠙",
+    "ढ": "⠹", "ण": "⠻", "त": "⠞", "थ": "⠮", "द": "⠙", "ध": "⠹",
+    "न": "⠝", "प": "⠏", "फ": "⠟", "ब": "⠃", "भ": "⠫", "म": "⠍",
+    "य": "⠽", "र": "⠗", "ल": "⠇", "व": "⠧", "श": "⠱", "ष": "⠳",
+    "स": "⠎", "ह": "⠓", "क्ष": "⠟", "ज्ञ": "⠻", "ड़": "⠚", "ढ़": "⠚",
+    "फ़": "⠋", "ज़": "⠵", "ग्य": "⠛⠽", "त्र": "⠞⠗", "श्र": "⠱⠗",
+    "ा": "⠡", "ि": "⠊", "ी": "⠒", "ु": "⠥", "ू": "⠳", "े": "⠑",
+    "ै": "⠣", "ो": "⠕", "ौ": "⠷", "ृ": "⠗", "्": "⠄", "ं": "⠈",
+    "ः": "⠘", "ँ": "⠨", "०": "⠚", "१": "⠁", "२": "⠃", "३": "⠉",
+    "४": "⠙", "५": "⠑", "६": "⠋", "७": "⠛", "८": "⠓", "९": "⠊",
+    "।": "⠲", "\"": "⠶", "'": "⠄", ";": "⠆", ":": "⠒", "-": "⠤",
+    "(": "⠶", ")": "⠶", "/": "⠌", "A": "⠁", "B": "⠃", "C": "⠉",
+    "D": "⠙", "E": "⠑", "F": "⠋", "G": "⠛", "H": "⠓", "I": "⠊",
+    "J": "⠚", "K": "⠅", "L": "⠇", "M": "⠍", "N": "⠝", "O": "⠕",
+    "P": "⠏", "Q": "⠟", "R": "⠗", "S": "⠎", "T": "⠞", "U": "⠥",
+    "V": "⠧", "W": "⠺", "X": "⠭", "Y": "⠽", "Z": "⠵"
+}
 
-def extract_text_from_image(image_path):
-    processed_image = preprocess_image(image_path)
-    pil_image = Image.fromarray(processed_image)
-    extracted_text = pytesseract.image_to_string(pil_image)
-    return extracted_text.strip()
+@lru_cache(maxsize=128)
+def text_to_braille(text):
+    return ''.join(braille_map.get(ch, ' ') for ch in text)
 
-def Braille2English(BrailleText):
-    return ''.join([English[braille.index(ch)] if ch in braille else '?' for ch in BrailleText])
-
-def English2Braille(EnglishText):
-    return ''.join([braille[English.index(ch)] if ch in English else '?' for ch in EnglishText])
-
-# Convert text to speech and save as MP3
-def text_to_speech(text, output_path):
-    tts = gTTS(text=text, lang='en', slow=False)
-    tts.save(output_path)
-    return output_path
-
-
+def save_tts_audio(text, lang, path):
+    try:
+        tts = gTTS(text=text, lang=lang)
+        tts.save(path)
+    except Exception as e:
+        print(f"[TTS ERROR] {e}")
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
-        if 'file' not in request.files:
-            return render_template('index.html', error="No file uploaded")
-        
-        file = request.files['file']
-        
-        if file.filename == '':
-            return render_template('index.html', error="No file selected")
-        
-        if file:
-            filename = 'uploaded_image.png'
-            file_path = os.path.join('static', filename)
-            file.save(file_path)
-            
-            try:
-                extracted_text = extract_text_from_image(file_path)
-                if extracted_text:
-                    braille_text = English2Braille(extracted_text.lower())
-                    english_from_braille = Braille2English(braille_text)
-                    
-                    # Generate audio file from extracted text
-                    audio_filename = 'output_audio.mp3'
-                    audio_path = os.path.join('static', audio_filename)
-                    text_to_speech(extracted_text, audio_path)
-                    
-                    return render_template('index.html',
-                                        extracted_text=extracted_text,
-                                        braille_text=braille_text,
-                                        english_from_braille=english_from_braille,
-                                        image_path=filename,
-                                       audio_path=audio_filename )
-                else:
-                    return render_template('index.html', error="No text detected in the image")
-            except Exception as e:
-                return render_template('index.html', error=f"Error: {str(e)}")
-    
+        if 'image' not in request.files or request.files['image'].filename == '':
+            return redirect(url_for('index'))
+
+        file = request.files['image']
+        filename = secure_filename(file.filename)
+        image_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(image_path)
+
+        # OCR
+        img = Image.open(image_path).convert("RGB")
+        extracted_text = pytesseract.image_to_string(img, lang='hin+eng')
+
+        # Language detection
+        try:
+            detected_lang = detect(extracted_text)
+        except:
+            detected_lang = 'en'
+        gtts_lang = 'hi' if detected_lang == 'hi' else 'en'
+
+        # Braille translation
+        braille_body = text_to_braille(extracted_text)
+        braille_prefix = '⠰⠓ ' if gtts_lang == 'hi' else '⠰⠑ '
+        braille_text = braille_prefix + braille_body
+
+        # TTS save
+        audio_filename = filename.rsplit('.', 1)[0] + '.mp3'
+        audio_path = os.path.join(app.config['AUDIO_FOLDER'], audio_filename)
+        save_tts_audio(extracted_text, gtts_lang, audio_path)
+
+        return render_template('index.html',
+                               original_image=f'uploads/{filename}',
+                               extracted_text=extracted_text,
+                               braille_text=braille_text,
+                               audio_file=f'audio/{audio_filename}')
+
     return render_template('index.html')
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host="0.0.0.0", port=5000)
